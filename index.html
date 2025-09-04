@@ -1,1 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dodge the Blocks Game</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --ink: #e5e7eb;
+      --accent: #22d3ee;
+      --accent2: #a78bfa;
+      --danger: #fb7185;
+    }
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: radial-gradient(1200px 600px at 10% -10%, #0f1a3b, transparent 50%), radial-gradient(1000px 600px at 90% 0%, #1a1042, transparent 60%), var(--bg); color: var(--ink); }
+    .wrap { display: grid; place-items: center; min-height: 100%; padding: 16px; gap: 12px; }
+    h1 { margin: 8px 0 0; font-weight: 700; letter-spacing: 0.2px; font-size: clamp(1.2rem, 1.2rem + 1vw, 1.6rem); }
+    .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.25); padding: 12px; }
+    canvas { display: block; width: min(92vw, 420px); height: calc(min(92vw, 420px) * 1.5); background: linear-gradient(180deg, #0b122e 0%, #0b122e 60%, #091225 100%); border-radius: 12px; border: 1px solid rgba(255,255,255,0.12); }
+    .hud { display: flex; justify-content: space-between; align-items: center; width: min(92vw, 420px); gap: 8px; }
+    .btns { display: grid; grid-auto-flow: column; gap: 8px; }
+    button { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #0a0a0a; border: 0; padding: 8px 12px; border-radius: 10px; font-weight: 700; cursor: pointer; }
+    button.secondary { background: transparent; color: var(--ink); border: 1px solid rgba(255,255,255,0.2); }
+    .help { max-width: min(92vw, 420px); font-size: 0.95rem; color: #cbd5e1; line-height: 1.45; }
+    .kbd { display: inline-grid; place-items: center; min-width: 1.5em; padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); margin: 0 2px; font-weight: 700; }
+    .touch { display: none; gap: 8px; width: min(92vw, 420px); }
+    .touch button { flex: 1; padding: 12px; }
+    @media (hover: none) and (pointer: coarse) {
+      .touch { display: grid; grid-auto-flow: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🟦 Dodge the Blocks</h1>
+    <div class="card"><canvas id="game" width="420" height="630" aria-label="Game canvas"></canvas></div>
+    <div class="hud">
+      <div>Score: <strong id="score">0</strong> · Best: <strong id="best">0</strong></div>
+      <div class="btns">
+        <button id="play">Play</button>
+        <button id="pause" class="secondary">Pause</button>
+        <button id="reset" class="secondary">Reset</button>
+      </div>
+    </div>
+    <div class="touch">
+      <button id="left">◀ Left</button>
+      <button id="right">Right ▶</button>
+    </div>
+    <p class="help">
+      Move with <span class="kbd">◀</span><span class="kbd">A</span> / <span class="kbd">D</span><span class="kbd">▶</span>. Press <span class="kbd">Space</span> to start, <span class="kbd">P</span> to pause. Avoid falling blocks. Survive to rack up points!
+    </p>
+  </div>
+
+  <script>
+    // --- Basic game state
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    const state = {
+      running: false,
+      paused: false,
+      score: 0,
+      best: Number(localStorage.getItem('dodge_best') || 0),
+      speed: 2.2,        // base fall speed
+      spawnEvery: 900,   // ms between spawns
+      lastSpawn: 0,
+      lastFrame: 0,
+      obstacles: [],
+      keys: new Set(),
+      player: { x: W/2 - 18, y: H - 70, w: 36, h: 36, speed: 4.2 }
+    };
+
+    const ui = {
+      score: document.getElementById('score'),
+      best: document.getElementById('best'),
+      play: document.getElementById('play'),
+      pause: document.getElementById('pause'),
+      reset: document.getElementById('reset'),
+      left: document.getElementById('left'),
+      right: document.getElementById('right'),
+    };
+    ui.best.textContent = state.best;
+
+    // --- Utility
+    function rnd(min, max) { return Math.random() * (max - min) + min; }
+    function aabb(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+    // --- Input
+    window.addEventListener('keydown', (e) => {
+      if (["ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyP"].includes(e.code)) e.preventDefault();
+      if (e.code === 'Space') start();
+      if (e.code === 'KeyP') togglePause();
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') state.keys.add('left');
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') state.keys.add('right');
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') state.keys.delete('left');
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') state.keys.delete('right');
+    });
+
+    ui.play.addEventListener('click', start);
+    ui.pause.addEventListener('click', togglePause);
+    ui.reset.addEventListener('click', resetGame);
+    ui.left.addEventListener('touchstart', () => state.keys.add('left'));
+    ui.left.addEventListener('touchend', () => state.keys.delete('left'));
+    ui.right.addEventListener('touchstart', () => state.keys.add('right'));
+    ui.right.addEventListener('touchend', () => state.keys.delete('right'));
+
+    function start(){
+      if (!state.running) {
+        state.running = true; state.paused = false; state.score = 0; state.speed = 2.2; state.spawnEvery = 900; state.obstacles.length = 0; state.lastSpawn = 0; state.lastFrame = 0; 
+        loop(0);
+      } else if (state.paused) {
+        state.paused = false;
+      }
+    }
+    function togglePause(){ if (state.running) state.paused = !state.paused; }
+    function gameOver(){
+      state.running = false; 
+      state.best = Math.max(state.best, Math.floor(state.score));
+      localStorage.setItem('dodge_best', state.best);
+      ui.best.textContent = state.best;
+      draw(true);
+    }
+    function resetGame(){ state.running = false; state.paused = false; state.score = 0; state.obstacles.length = 0; draw(false); }
+
+    // --- Game loop
+    function loop(ts){
+      if (!state.running) return; 
+      const dt = state.lastFrame ? Math.min(32, ts - state.lastFrame) : 16;
+      state.lastFrame = ts;
+      if (!state.paused) update(dt);
+      draw(false);
+      requestAnimationFrame(loop);
+    }
+
+    function update(dt){
+      const p = state.player;
+      // Move player
+      let vx = 0;
+      if (state.keys.has('left')) vx -= p.speed;
+      if (state.keys.has('right')) vx += p.speed;
+      p.x = Math.max(8, Math.min(W - p.w - 8, p.x + vx));
+
+      // Spawn obstacles
+      state.lastSpawn += dt;
+      if (state.lastSpawn >= state.spawnEvery) {
+        state.lastSpawn = 0;
+        const w = rnd(30, 90);
+        const x = rnd(8, W - w - 8);
+        const spd = state.speed + rnd(0.3, 1.2);
+        state.obstacles.push({ x, y: -40, w, h: rnd(14, 26), v: spd, hue: rnd(170, 260) });
+      }
+
+      // Update obstacles
+      for (const o of state.obstacles) {
+        o.y += o.v; 
+      }
+      // Remove off-screen
+      state.obstacles = state.obstacles.filter(o => o.y < H + 40);
+
+      // Collisions
+      for (const o of state.obstacles) {
+        if (aabb({x: p.x, y: p.y, w: p.w, h: p.h}, o)) { gameOver(); return; }
+      }
+
+      // Score & difficulty
+      state.score += dt * 0.02; // ~50 pts per second
+      if (Math.floor(state.score) % 150 === 0) { // step up occasionally
+        state.speed = Math.min(8, state.speed + 0.01);
+        state.spawnEvery = Math.max(380, state.spawnEvery - 1);
+      }
+    }
+
+    // --- Render
+    function draw(showGameOver){
+      // background
+      ctx.clearRect(0,0,W,H);
+      // Starscape
+      for (let i=0;i<60;i++) {
+        const x = (i * 73) % W, y = (i * 131) % H; const s = (i%3)+1;
+        ctx.fillStyle = `rgba(255,255,255,${0.06 + (i%5)/40})`;
+        ctx.fillRect((x + i*7)%W, (y + i*11)%H, s, s);
+      }
+
+      // Ground gradient glow
+      const g = ctx.createLinearGradient(0, H-140, 0, H);
+      g.addColorStop(0, 'rgba(34, 211, 238, 0.06)');
+      g.addColorStop(1, 'rgba(167, 139, 250, 0.10)');
+      ctx.fillStyle = g; ctx.fillRect(0, H-140, W, 140);
+
+      // Obstacles
+      for (const o of state.obstacles) {
+        ctx.fillStyle = `hsl(${o.hue} 90% 60% / .95)`;
+        roundRect(ctx, o.x, o.y, o.w, o.h, 6);
+      }
+
+      // Player
+      ctx.fillStyle = 'hsl(190 90% 60%)';
+      roundRect(ctx, state.player.x, state.player.y, state.player.w, state.player.h, 8);
+
+      // HUD
+      ui.score.textContent = Math.floor(state.score);
+
+      if (showGameOver) {
+        overlay(`Game Over`, `Score ${Math.floor(state.score)} • Best ${state.best}\nPress Space to play again`);
+      } else if (!state.running) {
+        overlay(`Dodge the Blocks`, `Press Space or Play to start\nUse Arrow keys / A D to move`);
+      } else if (state.paused) {
+        overlay(`Paused`, `Press P to resume`);
+      }
+    }
+
+    function overlay(title, subtitle){
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(0,0,W,H);
+      ctx.translate(W/2, H/2);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.font = '700 28px system-ui,Segoe UI,Roboto,Arial';
+      ctx.fillText(title, 0, -8);
+      ctx.font = '500 14px system-ui,Segoe UI,Roboto,Arial';
+      for (const [i,line] of subtitle.split('\n').entries()) {
+        ctx.fillStyle = 'rgba(255,255,255,0.8)';
+        ctx.fillText(line, 0, 22 + i*18);
+      }
+      ctx.restore();
+    }
+
+    function roundRect(ctx, x, y, w, h, r){
+      ctx.beginPath();
+      ctx.moveTo(x+r, y);
+      ctx.arcTo(x+w, y, x+w, y+h, r);
+      ctx.arcTo(x+w, y+h, x, y+h, r);
+      ctx.arcTo(x, y+h, x, y, r);
+      ctx.arcTo(x, y, x+w, y, r);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // initial paint
+    draw(false);
+  </script>
+</body>
+</html>
 
